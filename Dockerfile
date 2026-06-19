@@ -1,5 +1,7 @@
 FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     WORKSPACE=/opt \
@@ -31,8 +33,9 @@ COPY LTX-2-3-AUTO_INSTALL-RUNPOD-V2.sh /tmp/LTX-2-3-AUTO_INSTALL-RUNPOD-V2.sh
 COPY scripts/patch_ltx_blackwell_serverless.py /tmp/patch_ltx_blackwell_serverless.py
 
 # Install ComfyUI, custom nodes, and Python dependencies, but NOT model files.
-RUN chmod +x /tmp/LTX-2-3-AUTO_INSTALL-RUNPOD-V2.sh && \
-    python3 /tmp/patch_ltx_blackwell_serverless.py /tmp/LTX-2-3-AUTO_INSTALL-RUNPOD-V2.sh && \
+RUN set -eux; \
+    chmod +x /tmp/LTX-2-3-AUTO_INSTALL-RUNPOD-V2.sh; \
+    python3 /tmp/patch_ltx_blackwell_serverless.py /tmp/LTX-2-3-AUTO_INSTALL-RUNPOD-V2.sh; \
     WORKSPACE=/opt \
     COMFY_ROOT=/opt/ComfyUI \
     PYTHON_BIN=python3 \
@@ -40,7 +43,10 @@ RUN chmod +x /tmp/LTX-2-3-AUTO_INSTALL-RUNPOD-V2.sh && \
     RESET_REQUIRED_NODES=true \
     INSTALL_MODELS=false \
     VERIFY_TORCH_CUDA=false \
-    bash /tmp/LTX-2-3-AUTO_INSTALL-RUNPOD-V2.sh
+    VERIFY_LTX_IMPORT=false \
+    bash /tmp/LTX-2-3-AUTO_INSTALL-RUNPOD-V2.sh \
+      2>&1 | tee /tmp/ltx_install.log \
+    || (echo "==== LAST 300 LTX INSTALL LOG LINES ===="; tail -300 /tmp/ltx_install.log; exit 1)
 
 # Extra runtime deps: RunPod SDK, S3 upload/signing, and ComfyUI DB deps.
 RUN /opt/ComfyUI/venv/bin/python -m pip install --no-cache-dir --no-input --prefer-binary \
