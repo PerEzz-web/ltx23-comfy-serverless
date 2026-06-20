@@ -98,46 +98,47 @@ def load_workflow() -> Dict[str, Any]:
         return json.load(f)
 
 
-def resolve_cached_snapshot(model_id: str) -> pathlib.Path:
-    if CACHED_MODEL_PATH:
-        p = pathlib.Path(CACHED_MODEL_PATH)
-        if not p.exists():
-            raise FileNotFoundError(f"CACHED_MODEL_PATH does not exist: {p}")
-        return p
+def resolve_cached_snapshot(model_id: str) -> Path:
+    cache_root = Path("/runpod-volume/huggingface-cache/hub")
+    expected_name = "models--" + model_id.replace("/", "--")
 
-    if not model_id or "/" not in model_id:
-        raise RuntimeError(
-            "MODEL_ID must be set to your Hugging Face cached model repo, "
-            "for example MODEL_ID=your-user/ltx23-comfy-models"
+    candidates = []
+
+    exact_root = cache_root / expected_name
+    if exact_root.exists():
+        candidates.append(exact_root)
+
+    # Case-insensitive fallback because some UIs normalize HF URLs/usernames.
+    if cache_root.exists():
+        target_lower = expected_name.lower()
+        for p in cache_root.glob("models--*"):
+            if p.name.lower() == target_lower:
+                candidates.append(p)
+
+    if not candidates:
+        available = []
+        if cache_root.exists():
+            available = [p.name for p in cache_root.glob("*")][:50]
+
+        raise FileNotFoundError(
+            f"Could not find cached Hugging Face model for {model_id}. "
+            f"Expected under {exact_root}. "
+            f"Available cache entries: {available}. "
+            f"Make sure the endpoint Model field is set to {model_id}."
         )
 
-    org, name = model_id.split("/", 1)
-    model_root = HF_CACHE_ROOT / f"models--{org}--{name}"
-    refs_main = model_root / "refs" / "main"
-    snapshots = model_root / "snapshots"
+    model_root = candidates[0]
+    snapshots_dir = model_root / "snapshots"
 
-    log(f"Resolving cached model: {model_id}")
-    log(f"Model root: {model_root}")
+    if not snapshots_dir.exists():
+        raise FileNotFoundError(f"Cached model found, but snapshots folder missing: {snapshots_dir}")
 
-    if refs_main.exists():
-        revision = refs_main.read_text(encoding="utf-8").strip()
-        candidate = snapshots / revision
-        if candidate.exists():
-            log(f"Using cached snapshot from refs/main: {candidate}")
-            return candidate
+    snapshots = [p for p in snapshots_dir.iterdir() if p.is_dir()]
+    if not snapshots:
+        raise FileNotFoundError(f"No snapshots found in: {snapshots_dir}")
 
-    if snapshots.exists():
-        candidates = [p for p in snapshots.iterdir() if p.is_dir()]
-        if candidates:
-            candidate = max(candidates, key=lambda p: p.stat().st_mtime)
-            log(f"Using latest cached snapshot: {candidate}")
-            return candidate
-
-    raise FileNotFoundError(
-        f"Could not find cached Hugging Face model for {model_id}. "
-        f"Expected under {model_root}. Make sure the endpoint Model field is set."
-    )
-
+    snapshots.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return snapshots[0]
 
 def locate_model_base(snapshot: pathlib.Path) -> pathlib.Path:
     required_dirs = ["unet", "vae", "text_encoders", "latent_upscale_models", "loras"]
