@@ -15,7 +15,7 @@ on:
 
 env:
   IMAGE_NAME: ltx23-comfy-serverless
-  IMAGE_TAG: cu128-v2
+  IMAGE_TAG: cu128-v3
   BUILDKIT_PROGRESS: plain
 
 jobs:
