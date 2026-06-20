@@ -99,47 +99,115 @@ def load_workflow() -> Dict[str, Any]:
         return json.load(f)
 
 
-def resolve_cached_snapshot(model_id: str) -> Path:
-    cache_root = Path("/runpod-volume/huggingface-cache/hub")
-    expected_name = "models--" + model_id.replace("/", "--")
+def normalize_hf_model_id(value: str) -> str:
+    """
+    Accepts:
+      - PerEzz/ltx23-comfy-models
+      - perezz/ltx23-comfy-models
+      - https://huggingface.co/perezz/ltx23-comfy-models
+      - https://huggingface.co/perezz/ltx23-comfy-models:commit
+    Returns:
+      - namespace/repo
+    """
+    value = (value or "").strip()
 
-    candidates = []
+    if not value:
+        return ""
 
-    exact_root = cache_root / expected_name
-    if exact_root.exists():
-        candidates.append(exact_root)
+    if value.startswith("http://") or value.startswith("https://"):
+        parsed = urlparse(value)
+        path = parsed.path.strip("/")
+        parts = path.split("/")
+        if len(parts) >= 2:
+            value = f"{parts[0]}/{parts[1]}"
 
-    # Case-insensitive fallback because some UIs normalize HF URLs/usernames.
-    if cache_root.exists():
-        target_lower = expected_name.lower()
-        for p in cache_root.glob("models--*"):
-            if p.name.lower() == target_lower:
-                candidates.append(p)
+    # Remove optional commit/revision suffixes from UI-normalized values.
+    value = value.split(":", 1)[0]
+    value = value.split("@", 1)[0]
 
-    if not candidates:
-        available = []
-        if cache_root.exists():
-            available = [p.name for p in cache_root.glob("*")][:50]
+    return value.strip("/")
 
-        raise FileNotFoundError(
-            f"Could not find cached Hugging Face model for {model_id}. "
-            f"Expected under {exact_root}. "
-            f"Available cache entries: {available}. "
-            f"Make sure the endpoint Model field is set to {model_id}."
-        )
 
-    model_root = candidates[0]
+def latest_snapshot_from_model_root(model_root: Path) -> Path:
     snapshots_dir = model_root / "snapshots"
 
     if not snapshots_dir.exists():
-        raise FileNotFoundError(f"Cached model found, but snapshots folder missing: {snapshots_dir}")
+        # Fallback for non-standard cache layouts.
+        return model_root
+
+    refs_main = model_root / "refs" / "main"
+    if refs_main.exists():
+        commit = refs_main.read_text(encoding="utf-8").strip()
+        snapshot = snapshots_dir / commit
+        if snapshot.exists():
+            return snapshot
 
     snapshots = [p for p in snapshots_dir.iterdir() if p.is_dir()]
     if not snapshots:
-        raise FileNotFoundError(f"No snapshots found in: {snapshots_dir}")
+        raise FileNotFoundError(f"No snapshots found in {snapshots_dir}")
 
     snapshots.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return snapshots[0]
+
+
+def resolve_cached_snapshot(model_id: str) -> Path:
+    cache_root = Path(
+        os.environ.get(
+            "HF_CACHE_ROOT",
+            "/runpod-volume/huggingface-cache/hub",
+        )
+    )
+
+    # Try env var again at runtime, then fallback to your current repo.
+    model_id = normalize_hf_model_id(
+        model_id
+        or os.environ.get("MODEL_ID", "")
+        or os.environ.get("MODEL_ID_FALLBACK", "")
+        or "PerEzz/ltx23-comfy-models"
+    )
+
+    if not cache_root.exists():
+        raise FileNotFoundError(
+            f"HF cache root does not exist: {cache_root}. "
+            f"Make sure RunPod Model field is set."
+        )
+
+    available_roots = [p for p in cache_root.glob("models--*") if p.is_dir()]
+    available_names = [p.name for p in available_roots]
+
+    # If MODEL_ID exists, try exact and case-insensitive matching.
+    if model_id:
+        expected_name = "models--" + model_id.replace("/", "--")
+        expected_root = cache_root / expected_name
+
+        if expected_root.exists():
+            return latest_snapshot_from_model_root(expected_root)
+
+        expected_lower = expected_name.lower()
+        for root in available_roots:
+            if root.name.lower() == expected_lower:
+                return latest_snapshot_from_model_root(root)
+
+        # Repo-name fallback, useful when RunPod lowercases namespace.
+        repo_name = model_id.split("/")[-1].lower()
+        matches = [
+            root for root in available_roots
+            if root.name.lower().endswith("--" + repo_name)
+        ]
+        if len(matches) == 1:
+            return latest_snapshot_from_model_root(matches[0])
+
+    # If MODEL_ID is blank or broken, but only one cached model exists, use it.
+    if len(available_roots) == 1:
+        print(f"[ltx-worker] MODEL_ID missing/invalid. Using only cached model: {available_roots[0]}")
+        return latest_snapshot_from_model_root(available_roots[0])
+
+    raise FileNotFoundError(
+        f"Could not resolve cached Hugging Face model. "
+        f"MODEL_ID={model_id!r}. "
+        f"Available cache entries: {available_names}. "
+        f"Set MODEL_ID=PerEzz/ltx23-comfy-models or ensure only one cached model is mounted."
+    )
 
 def locate_model_base(snapshot: pathlib.Path) -> pathlib.Path:
     required_dirs = ["unet", "vae", "text_encoders", "latent_upscale_models", "loras"]
